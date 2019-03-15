@@ -21,15 +21,13 @@ ROOT_DIR = os.getcwd()
 
 # Directory to save logs and trained model
 MODEL_DIR = os.path.join(ROOT_DIR, "logs")
+CLUSTER_TRAIN_DIR = ""
 
 # Path to trained weights file
 # Download this file and place in the root of your
 # project (See README file for details)
-MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190312T2318/mask_rcnn_seafloor_0060.pth"
+MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190311T1813/mask_rcnn_seafloor_0010.pth"
 
-# Directory of images to run detection on
-IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/Examples"
-IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/demo"
 
 
 class InferenceConfig(seafloor_config):
@@ -53,7 +51,18 @@ model.load_weights(MODEL_PATH)
 # COCO Class names
 # Index of the class in the list is its ID. For example, to get ID of
 # the teddy bear class, use: class_names.index('teddy bear')
-class_names = ["BG", "Coral", "Terrain", "Fish"]
+class_names = ["BG", "Other", "Big_Lump", "Potato", "Brain"]
+
+dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
+configDir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/config.json"
+ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation_zero_shot.pkl"
+IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
+
+from clustering_dataset import seafloor_dataset
+dataset_train = seafloor_dataset()
+dataset_train.load_seafloor(dir, configDir, ann_path)
+dataset_train.prepare()
+model.train_clustering(dataset_train)
 
 plt.figure(figsize=(15, 9))
 plt.ion()
@@ -62,16 +71,9 @@ import time
 for i, file in enumerate(sorted(os.listdir(IMAGE_DIR))):
     if "mask" not in file:
         image = skimage.io.imread(os.path.join(IMAGE_DIR, file))
-        results = model.detect([image])
+        results = model.detect([image], clusterCategory=True)
         r = results[0]
         ax = plt.figure(1).subplots(1)
         temp = time.time()
         visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
                                     class_names, r['scores'], ax=ax)
-
-
-#TODO:
-#1. evaluate performance on training data
-#2. evaluate performance on untrained images - same species, different species
-#3. zero shot learning - feature clustering to predict similarity. Could define new species. 10 training images per class
-

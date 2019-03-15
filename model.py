@@ -99,6 +99,7 @@ class SamePad2d(nn.Module):
         super(SamePad2d, self).__init__()
         self.kernel_size = torch.nn.modules.utils._pair(kernel_size)
         self.stride = torch.nn.modules.utils._pair(stride)
+        self.ground_truth = []
 
     def forward(self, input):
         in_width = input.size()[2]
@@ -674,7 +675,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
         zeros = Variable(torch.zeros(negative_count), requires_grad=False).int()
         if config.GPU_COUNT:
             zeros = zeros.cuda()
-        roi_gt_class_ids = torch.cat([roi_gt_class_ids, zeros], dim=0)
+        roi_gt_class_ids = torch.cat([roi_gt_class_ids.type(torch.cuda.IntTensor), zeros], dim=0)
         zeros = Variable(torch.zeros(negative_count,4), requires_grad=False)
         if config.GPU_COUNT:
             zeros = zeros.cuda()
@@ -1416,6 +1417,8 @@ class MaskRCNN(nn.Module):
         self.initialize_weights()
         self.loss_history = []
         self.val_loss_history = []
+        self.ground_truth = []
+        self.ground_truth_ids = []
 
     def build(self, config):
         """Build Mask R-CNN architecture.
@@ -1464,6 +1467,81 @@ class MaskRCNN(nn.Module):
                 for p in m.parameters(): p.requires_grad = False
 
         self.apply(set_bn_fix)
+
+
+    def train_clustering(self, train_dataset):
+
+        train_set = Dataset(train_dataset, self.config, augment=True)
+        train_generator = torch.utils.data.DataLoader(train_set, batch_size=1, shuffle=True, num_workers=4)
+        for inputs in train_generator:
+
+            images = inputs[0]
+            image_metas = inputs[1]
+            rpn_match = inputs[2]
+            rpn_bbox = inputs[3]
+            gt_class_ids = inputs[4]
+            gt_boxes = inputs[5]
+            gt_masks = inputs[6]
+
+            images = Variable(images)
+            rpn_match = Variable(rpn_match, volatile=True)
+            rpn_bbox = Variable(rpn_bbox, volatile=True)
+            gt_class_ids = Variable(gt_class_ids, volatile=True)
+            gt_boxes = Variable(gt_boxes, volatile=True)
+            gt_masks = Variable(gt_masks, volatile=True)
+
+            images = images.cuda()
+            rpn_match = rpn_match.cuda()
+            rpn_bbox = rpn_bbox.cuda()
+            gt_class_ids = gt_class_ids.cuda()
+            gt_boxes = gt_boxes.cuda()
+            gt_masks = gt_masks.cuda()
+
+            molded_images = images
+            self.eval()
+            # Feature extraction
+            [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(molded_images)
+
+            # Note that P6 is used in RPN, but not in the classifier heads.
+            rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
+            mrcnn_feature_maps = [p2_out, p3_out, p4_out, p5_out]
+
+            # Loop through pyramid layers
+            layer_outputs = []  # list of lists
+            for p in rpn_feature_maps:
+                layer_outputs.append(self.rpn(p))
+
+            # Concatenate layer outputs
+            # Convert from list of lists of level outputs to list of lists
+            # of outputs across levels.
+            # e.g. [[a1, b1, c1], [a2, b2, c2]] => [[a1, a2], [b1, b2], [c1, c2]]
+            outputs = list(zip(*layer_outputs))
+            outputs = [torch.cat(list(o), dim=1) for o in outputs]
+            rpn_class_logits, rpn_class, rpn_bbox = outputs
+
+            h, w = self.config.IMAGE_SHAPE[:2]
+            scale = Variable(torch.from_numpy(np.array([h, w, h, w])).float(), requires_grad=False)
+            if self.config.GPU_COUNT:
+                scale = scale.cuda()
+            gt_boxes = gt_boxes / scale
+
+            # Generate proposals
+            # Proposals are [batch, N, (y1, x1, y2, x2)] in normalized coordinates
+            # and zero padded.
+            proposal_count = self.config.POST_NMS_ROIS_INFERENCE
+
+            x = pyramid_roi_align([gt_boxes] + mrcnn_feature_maps, self.config.POOL_SIZE, self.config.IMAGE_SHAPE)
+            x2 = x.cpu()
+            gt_class_ids2 = gt_class_ids.cpu()
+
+
+            for feature in x2:
+                self.ground_truth.append(feature.view(-1))
+            for id in gt_class_ids2[0]:
+                self.ground_truth_ids.append(id)
+
+            torch.cuda.empty_cache()
+
 
     def initialize_weights(self):
         """Initialize model weights.
@@ -1552,7 +1630,7 @@ class MaskRCNN(nn.Module):
         checkpoint = os.path.join(dir_name, checkpoints[-1])
         return dir_name, checkpoint
 
-    def load_weights(self, filepath):
+    def load_weights_pretrained(self, filepath):
         """Modified version of the correspoding Keras function with
         the addition of multi-GPU support and the ability to exclude
         some layers from loading.
@@ -1560,7 +1638,11 @@ class MaskRCNN(nn.Module):
         """
         if os.path.exists(filepath):
             state_dict = torch.load(filepath)
-            self.load_state_dict(state_dict, strict=False)
+            new_dict = {k.replace('module.', ''): v for k, v in state_dict.items()
+                        if 'linear_bbox' not in k and not v.shape[0] == 81}
+            this_state = self.state_dict()
+            this_state.update(new_dict)
+            self.load_state_dict(this_state)
         else:
             print("Weight file not found ...")
 
@@ -1569,7 +1651,26 @@ class MaskRCNN(nn.Module):
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
-    def detect(self, images):
+    def load_weights(self, filepath):
+        """Modified version of the correspoding Keras function with
+        the addition of multi-GPU support and the ability to exclude
+        some layers from loading.
+        exlude: list of layer names to excluce
+        """
+        if os.path.exists(filepath):
+            state_dict = torch.load(filepath)
+            this_state = self.state_dict()
+            this_state.update(state_dict)
+            self.load_state_dict(this_state)
+        else:
+            print("Weight file not found ...")
+
+        # Update the log directory
+        self.set_log_dir(filepath)
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+
+    def detect(self, images, clusterCategory = False):
         """Runs the detection pipeline.
 
         images: List of images, potentially of different sizes.
@@ -1594,8 +1695,13 @@ class MaskRCNN(nn.Module):
         # Wrap in variable
         molded_images = Variable(molded_images, volatile=True)
 
+        detections, mrcnn_mask = None, None
+
         # Run object detection
-        detections, mrcnn_mask = self.predict([molded_images, image_metas], mode='inference')
+        if clusterCategory:
+            detections, mrcnn_mask = self.predict([molded_images, image_metas], mode='zeroshot')
+        else:
+            detections, mrcnn_mask = self.predict([molded_images, image_metas], mode='inference')
 
         # Convert to numpy
         detections = detections.data.cpu().numpy()
@@ -1619,7 +1725,7 @@ class MaskRCNN(nn.Module):
         molded_images = input[0]
         image_metas = input[1]
 
-        if mode == 'inference':
+        if not mode == 'training':
             self.eval()
         elif mode == 'training':
             self.train()
@@ -1673,8 +1779,6 @@ class MaskRCNN(nn.Module):
             detections = detection_layer(self.config, rpn_rois, mrcnn_class, mrcnn_bbox, image_metas)
 
             # Convert boxes to normalized coordinates
-            # TODO: let DetectionLayer return normalized coordinates to avoid
-            #       unnecessary conversions
             h, w = self.config.IMAGE_SHAPE[:2]
             scale = Variable(torch.from_numpy(np.array([h, w, h, w])).float(), requires_grad=False)
             if self.config.GPU_COUNT:
@@ -1683,6 +1787,77 @@ class MaskRCNN(nn.Module):
 
             # Add back batch dimension
             detection_boxes = detection_boxes.unsqueeze(0)
+
+            # Create masks for detections
+            mrcnn_mask = self.mask(mrcnn_feature_maps, detection_boxes)
+
+            # Add back batch dimension
+            detections = detections.unsqueeze(0)
+            mrcnn_mask = mrcnn_mask.unsqueeze(0)
+
+            return [detections, mrcnn_mask]
+
+        elif mode == 'zeroshot':
+            # Network Heads
+            # Proposal classifier and BBox regressor heads
+            mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rpn_rois)
+
+
+
+            # Detections
+            # output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in image coordinates
+            detections = detection_layer(self.config, rpn_rois, mrcnn_class, mrcnn_bbox, image_metas)
+
+            # Convert boxes to normalized coordinates
+            h, w = self.config.IMAGE_SHAPE[:2]
+            scale = Variable(torch.from_numpy(np.array([h, w, h, w])).float(), requires_grad=False)
+            if self.config.GPU_COUNT:
+                scale = scale.cuda()
+            detection_boxes = detections[:, :4] / scale
+
+            # Add back batch dimension
+            detection_boxes = detection_boxes.unsqueeze(0)
+
+            # TODO: take features from self.classifier and run clustering
+            # TODO: also save feature vectors, output category in an object by making a new method that takes a labeled bounding box and outputs a feature vector, skips region proposal
+            x = pyramid_roi_align([detection_boxes] + mrcnn_feature_maps, self.config.POOL_SIZE, self.config.IMAGE_SHAPE)
+            x = x.cpu()
+            for i, feature in enumerate(x):
+                k = 1
+                closests = []
+
+                def euclidian_distance(in1, in2):
+                    dist = 0
+                    for u in range(len(in1)):
+                        dist += (in1[u].data.numpy()[0] - in2[u].data.numpy()[0]) ** 2
+                    return dist ** (.5)
+
+                for d in range(k):
+                    closests.append([self.ground_truth[d], self.ground_truth_ids[d]])
+
+                feature = feature.view(-1)
+
+                for d in range(len(self.ground_truth)):
+                    closests.sort()
+                    for j in range(len(closests)):
+                        if euclidian_distance(feature, closests[-j][0]) > euclidian_distance(feature, self.ground_truth[d]):
+                            closests[-j] = [self.ground_truth[d], self.ground_truth_ids[d]]
+                            continue
+
+                dict = {}
+                for closest in closests:
+                    if closest[1] in dict:
+                        dict[closest[1]] += 1
+                    else:
+                        dict[closest[1]] = 1
+
+                max = -999999
+                maxId = -1
+                for p in dict:
+                    if dict[p] > max:
+                        max = dict[p]
+                        maxId = p
+                detections[i, 4] = maxId
 
             # Create masks for detections
             mrcnn_mask = self.mask(mrcnn_feature_maps, detection_boxes)
@@ -1744,7 +1919,7 @@ class MaskRCNN(nn.Module):
         layers: Allows selecting wich layers to train. It can be:
             - A regular expression to match layer names to train
             - One of these predefined values:
-              heaads: The RPN, classifier and mask heads of the network
+              heads: The RPN, classifier and mask heads of the network
               all: All the layers
               3+: Train Resnet stage 3 and up
               4+: Train Resnet stage 4 and up
