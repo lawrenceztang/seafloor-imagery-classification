@@ -51,12 +51,13 @@ model.load_weights(MODEL_PATH)
 # COCO Class names
 # Index of the class in the list is its ID. For example, to get ID of
 # the teddy bear class, use: class_names.index('teddy bear')
-class_names = ["BG", "Other", "Big_Lump", "Potato", "Brain"]
+class_names = ["BG", "Other", "Big_Lump", "Potato"]
+class_names = [str(i) for i in range(100)]
 
 dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
 configDir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/config.json"
 ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation_zero_shot.pkl"
-IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
+IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/demo"
 
 from clustering_dataset import seafloor_dataset
 dataset_train = seafloor_dataset()
@@ -65,15 +66,21 @@ dataset_train.prepare()
 model.train_clustering(dataset_train)
 
 plt.figure(figsize=(15, 9))
-plt.ion()
-import time
+
+ax = plt.figure(1).subplots(1)
+im = ax.imshow(skimage.io.imread(os.path.join(IMAGE_DIR, os.listdir(IMAGE_DIR)[0])))
 
 for i, file in enumerate(sorted(os.listdir(IMAGE_DIR))):
     if "mask" not in file:
         image = skimage.io.imread(os.path.join(IMAGE_DIR, file))
-        results = model.detect([image], clusterCategory=True)
+        results = model.detect([image], mode="zeroshot_no_training")
         r = results[0]
-        ax = plt.figure(1).subplots(1)
-        temp = time.time()
         visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
-                                    class_names, r['scores'], ax=ax)
+                                    class_names, r['scores'], ax=ax, im=im)
+
+model.pca()
+
+#don't train bounding box on terrain, just coral
+#do this by removing terrain bounding boxes from ground truth
+#but use them for classification when training
+

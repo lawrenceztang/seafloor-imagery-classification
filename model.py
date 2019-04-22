@@ -26,6 +26,8 @@ import visualize
 from nms.nms_wrapper import nms
 from roialign.roi_align.crop_and_resize import CropAndResizeFunction
 
+from sklearn.neighbors import KNeighborsClassifier
+
 
 ############################################################
 #  Logging Utility Functions
@@ -99,7 +101,6 @@ class SamePad2d(nn.Module):
         super(SamePad2d, self).__init__()
         self.kernel_size = torch.nn.modules.utils._pair(kernel_size)
         self.stride = torch.nn.modules.utils._pair(stride)
-        self.ground_truth = []
 
     def forward(self, input):
         in_width = input.size()[2]
@@ -670,6 +671,9 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
 
     # Append negative ROIs and pad bbox deltas and masks that
     # are not used for negative ROIs with zeros.
+
+    #TODO: negative rois have an id of 0
+
     if positive_count > 0 and negative_count > 0:
         rois = torch.cat((positive_rois, negative_rois), dim=0)
         zeros = Variable(torch.zeros(negative_count), requires_grad=False).int()
@@ -1400,6 +1404,9 @@ class Dataset(torch.utils.data.Dataset):
 #  MaskRCNN Class
 ############################################################
 
+
+from sklearn.cluster import MiniBatchKMeans, KMeans
+
 class MaskRCNN(nn.Module):
     """Encapsulates the Mask RCNN model functionality.
     """
@@ -1417,8 +1424,10 @@ class MaskRCNN(nn.Module):
         self.initialize_weights()
         self.loss_history = []
         self.val_loss_history = []
+
+        self.k_means = KMeans(n_clusters=0)
         self.ground_truth = []
-        self.ground_truth_ids = []
+        self.min_dist_for_new_cluster = 30
 
     def build(self, config):
         """Build Mask R-CNN architecture.
@@ -1469,10 +1478,34 @@ class MaskRCNN(nn.Module):
         self.apply(set_bn_fix)
 
 
+
+
+    def pca(self):
+
+        import matplotlib.pyplot as plt
+        import pandas as pd
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2)
+        projected = pca.fit_transform(self.pca_vectors)
+        plt.scatter(projected[:, 0], projected[:, 1],
+                    c=self.pca_targets, edgecolor='none', alpha=0.5,
+                    cmap=plt.cm.get_cmap('spectral', 10))
+        plt.xlabel('component 1')
+        plt.ylabel('component 2')
+        plt.colorbar()
+        plt.show()
+
+
+
     def train_clustering(self, train_dataset):
+
+        self.pca_vectors = []
+        self.pca_targets = []
 
         train_set = Dataset(train_dataset, self.config, augment=True)
         train_generator = torch.utils.data.DataLoader(train_set, batch_size=1, shuffle=True, num_workers=4)
+        ground_truth = []
+        ground_truth_ids = []
         for inputs in train_generator:
 
             images = inputs[0]
@@ -1530,17 +1563,28 @@ class MaskRCNN(nn.Module):
             # and zero padded.
             proposal_count = self.config.POST_NMS_ROIS_INFERENCE
 
+
             x = pyramid_roi_align([gt_boxes] + mrcnn_feature_maps, self.config.POOL_SIZE, self.config.IMAGE_SHAPE)
+            x = self.classifier.conv1(x)
+            x = self.classifier.bn1(x)
+            x = self.classifier.relu(x)
+            x = self.classifier.conv2(x)
+            x = self.classifier.bn2(x)
+            x = self.classifier.relu(x)
+
             x2 = x.cpu()
             gt_class_ids2 = gt_class_ids.cpu()
 
 
             for feature in x2:
-                self.ground_truth.append(feature.view(-1))
+                ground_truth.append(feature.view(-1).data.numpy())
+                self.pca_vectors.append(feature.view(-1).data.numpy())
             for id in gt_class_ids2[0]:
-                self.ground_truth_ids.append(id)
+                ground_truth_ids.append(id.data.numpy()[0])
+                self.pca_targets.append(id.data.numpy()[0])
 
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
+        self.nearestNeighbors = KNeighborsClassifier(n_neighbors=1).fit(ground_truth, ground_truth_ids)
 
 
     def initialize_weights(self):
@@ -1670,7 +1714,7 @@ class MaskRCNN(nn.Module):
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
-    def detect(self, images, clusterCategory = False):
+    def detect(self, images, mode="zeroshot_no_training"):
         """Runs the detection pipeline.
 
         images: List of images, potentially of different sizes.
@@ -1698,10 +1742,8 @@ class MaskRCNN(nn.Module):
         detections, mrcnn_mask = None, None
 
         # Run object detection
-        if clusterCategory:
-            detections, mrcnn_mask = self.predict([molded_images, image_metas], mode='zeroshot')
-        else:
-            detections, mrcnn_mask = self.predict([molded_images, image_metas], mode='inference')
+
+        detections, mrcnn_mask = self.predict([molded_images, image_metas], mode=mode)
 
         # Convert to numpy
         detections = detections.data.cpu().numpy()
@@ -1721,7 +1763,9 @@ class MaskRCNN(nn.Module):
             })
         return results
 
+
     def predict(self, input, mode):
+
         molded_images = input[0]
         image_metas = input[1]
 
@@ -1796,6 +1840,65 @@ class MaskRCNN(nn.Module):
             mrcnn_mask = mrcnn_mask.unsqueeze(0)
 
             return [detections, mrcnn_mask]
+        elif mode == 'zeroshot_no_training':
+
+            # Network Heads
+            # Proposal classifier and BBox regressor heads
+            mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rpn_rois)
+
+            # Detections
+            # output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in image coordinates
+            detections = detection_layer(self.config, rpn_rois, mrcnn_class, mrcnn_bbox, image_metas)
+
+            # Convert boxes to normalized coordinates
+            h, w = self.config.IMAGE_SHAPE[:2]
+            scale = Variable(torch.from_numpy(np.array([h, w, h, w])).float(), requires_grad=False)
+            if self.config.GPU_COUNT:
+                scale = scale.cuda()
+            detection_boxes = detections[:, :4] / scale
+
+            # Add back batch dimension
+            detection_boxes = detection_boxes.unsqueeze(0)
+
+            x = pyramid_roi_align([detection_boxes] + mrcnn_feature_maps, self.config.POOL_SIZE,
+                                  self.config.IMAGE_SHAPE)
+            x = self.classifier.conv1(x)
+            x = self.classifier.bn1(x)
+            x = self.classifier.relu(x)
+            x = self.classifier.conv2(x)
+            x = self.classifier.bn2(x)
+            x = self.classifier.relu(x)
+
+            x = x.cpu()
+            x = [feature.view(-1).data.numpy() for feature in x]
+
+            self.ground_truth = self.ground_truth + x
+
+
+            for i in x:
+                if self.k_means.n_clusters == 0:
+                    self.k_means = KMeans(n_clusters=1)
+                    self.k_means.fit(self.ground_truth)
+                else:
+                    temp = []
+                    temp.append(i)
+                    distances = self.k_means.transform(temp)
+                    if np.min(distances) > self.min_dist_for_new_cluster:
+                        self.k_means = KMeans(n_clusters=self.k_means.n_clusters + 1)
+                        self.k_means.fit_transform(self.ground_truth)
+
+            temp = torch.from_numpy(self.k_means.predict(x) + 1)
+            for i in range(len(x)):
+                detections[i, 4] = temp[i]
+
+            # Create masks for detections
+            mrcnn_mask = self.mask(mrcnn_feature_maps, detection_boxes)
+
+            # Add back batch dimension
+            detections = detections.unsqueeze(0)
+            mrcnn_mask = mrcnn_mask.unsqueeze(0)
+
+            return [detections, mrcnn_mask]
 
         elif mode == 'zeroshot':
             # Network Heads
@@ -1818,46 +1921,21 @@ class MaskRCNN(nn.Module):
             # Add back batch dimension
             detection_boxes = detection_boxes.unsqueeze(0)
 
-            # TODO: take features from self.classifier and run clustering
-            # TODO: also save feature vectors, output category in an object by making a new method that takes a labeled bounding box and outputs a feature vector, skips region proposal
             x = pyramid_roi_align([detection_boxes] + mrcnn_feature_maps, self.config.POOL_SIZE, self.config.IMAGE_SHAPE)
+            x = self.classifier.conv1(x)
+            x = self.classifier.bn1(x)
+            x = self.classifier.relu(x)
+            x = self.classifier.conv2(x)
+            x = self.classifier.bn2(x)
+            x = self.classifier.relu(x)
+
             x = x.cpu()
-            for i, feature in enumerate(x):
-                k = 1
-                closests = []
+            x = [feature.view(-1).data.numpy() for feature in x]
 
-                def euclidian_distance(in1, in2):
-                    dist = 0
-                    for u in range(len(in1)):
-                        dist += (in1[u].data.numpy()[0] - in2[u].data.numpy()[0]) ** 2
-                    return dist ** (.5)
-
-                for d in range(k):
-                    closests.append([self.ground_truth[d], self.ground_truth_ids[d]])
-
-                feature = feature.view(-1)
-
-                for d in range(len(self.ground_truth)):
-                    closests.sort()
-                    for j in range(len(closests)):
-                        if euclidian_distance(feature, closests[-j][0]) > euclidian_distance(feature, self.ground_truth[d]):
-                            closests[-j] = [self.ground_truth[d], self.ground_truth_ids[d]]
-                            continue
-
-                dict = {}
-                for closest in closests:
-                    if closest[1] in dict:
-                        dict[closest[1]] += 1
-                    else:
-                        dict[closest[1]] = 1
-
-                max = -999999
-                maxId = -1
-                for p in dict:
-                    if dict[p] > max:
-                        max = dict[p]
-                        maxId = p
-                detections[i, 4] = maxId
+            indices = self.nearestNeighbors.predict(x)
+            indices = torch.from_numpy(indices)
+            for i in range(len(x)):
+                detections[i, 4] = indices[i]
 
             # Create masks for detections
             mrcnn_mask = self.mask(mrcnn_feature_maps, detection_boxes)
@@ -1869,6 +1947,8 @@ class MaskRCNN(nn.Module):
             return [detections, mrcnn_mask]
 
         elif mode == 'training':
+
+            #TODO: add terrain to rpn_rois to train classifier but make terrain not count for rpn_class_logits and rpn_match
 
             gt_class_ids = input[2]
             gt_boxes = input[3]

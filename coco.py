@@ -519,8 +519,8 @@ if __name__ == '__main__':
         coco = dataset_val.load_coco(args.dataset, "minival", year=args.year, return_coco=True, auto_download=args.download)
         dataset_val.prepare()
         print("Running COCO evaluation on {} images.".format(args.limit))
-        evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
-        evaluate_coco(model, dataset_val, coco, "segm", limit=int(args.limit))
+        evaluate_coco(model, dataset_val, coco, "bbox", limit=100)
+        evaluate_coco(model, dataset_val, coco, "segm", limit=100)
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(args.command))

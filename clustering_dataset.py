@@ -70,8 +70,6 @@ def get_supercategory(id):
         return 2
     elif id == 12:
         return 3
-    elif id == 1:
-        return 4
     else:
         return 1
 
@@ -82,7 +80,6 @@ class seafloor_dataset(utils.Dataset):
         self.add_class("seafloor", 1, "other")
         self.add_class("seafloor", 2, "weird_big_lump")
         self.add_class("seafloor", 3, "potato")
-        self.add_class("seafloor", 4, "brain")
         import json
         import pickle
         config = json.load(open(configDir))
@@ -111,6 +108,55 @@ class seafloor_dataset(utils.Dataset):
                 i += 1
                 print(i) if i % 10 == 0 else ""
         pickle.dump(annotations, open(ann_path, "wb"), pickle.HIGHEST_PROTOCOL)
+
+    def load_coco(self, dataset_dir, subset, annotation_dir, class_ids=None, return_coco=False):
+        """Load a subset of the COCO dataset.
+        dataset_dir: The root directory of the COCO dataset.
+        subset: What to load (train, val, minival, valminusminival)
+        year: What dataset year to load (2014, 2017) as a string, not an integer
+        class_ids: If provided, only loads images that have the given classes.
+        class_map: TODO: Not implemented yet. Supports maping classes from
+            different datasets to the same class ID.
+        return_coco: If True, returns the COCO object.
+        auto_download: Automatically download and unzip MS-COCO images and annotations
+        """
+
+
+        coco = COCO(annotation_dir)
+        image_dir = "{}/{}".format(dataset_dir, subset)
+
+        # Load all classes or a subset?
+        if not class_ids:
+            # All classes
+            class_ids = sorted(coco.getCatIds())
+
+        # All images or a subset?
+        if class_ids:
+            image_ids = []
+            for id in class_ids:
+                image_ids.extend(list(coco.getImgIds(catIds=[id])))
+            # Remove duplicates
+            image_ids = list(set(image_ids))
+        else:
+            # All images
+            image_ids = list(coco.imgs.keys())
+
+        # Add classes
+        for i in class_ids:
+            self.add_class("coco", i, coco.loadCats(i)[0]["name"])
+
+        # Add images
+        for i in image_ids:
+            self.add_image(
+                "coco", image_id=i,
+                path=os.path.join(image_dir, coco.imgs[i]['file_name']),
+                width=coco.imgs[i]["width"],
+                height=coco.imgs[i]["height"],
+                annotations=coco.loadAnns(coco.getAnnIds(
+                    imgIds=[i], catIds=class_ids, iscrowd=None)))
+        if return_coco:
+            return coco
+
 
 
     def loadAnns(self, dir):
@@ -166,4 +212,133 @@ class seafloor_config(Config):
     NUM_CLASSES = 1 + 3  # COCO has 80 classes
     LEARNING_RATE = 0.001
 
+def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
+    """Arrange resutls to match COCO specs in http://cocodataset.org/#format
+    """
+    # If no results, return an empty list
+    if rois is None:
+        return []
 
+    results = []
+    for image_id in image_ids:
+        # Loop through detections
+        for i in range(rois.shape[0]):
+            class_id = class_ids[i]
+            score = scores[i]
+            bbox = np.around(rois[i], 1)
+            mask = masks[:, :, i]
+
+            result = {
+                "image_id": image_id,
+                "category_id": dataset.get_source_class_id(class_id, "coco"),
+                "bbox": [bbox[1], bbox[0], bbox[3] - bbox[1], bbox[2] - bbox[0]],
+                "score": score,
+                "segmentation": maskUtils.encode(np.asfortranarray(mask))
+            }
+            results.append(result)
+    return results
+
+def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=None):
+    """Runs official COCO evaluation.
+    dataset: A Dataset object with valiadtion data
+    eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
+    limit: if not 0, it's the number of images to use for evaluation
+    """
+    # Pick COCO images from the dataset
+    image_ids = image_ids or dataset.image_ids
+
+    # Limit to a subset
+    if limit:
+        image_ids = image_ids[:limit]
+
+    # Get corresponding COCO image IDs.
+    coco_image_ids = [dataset.image_info[id]["id"] for id in image_ids]
+
+    t_prediction = 0
+    t_start = time.time()
+
+    results = []
+    for i, image_id in enumerate(image_ids):
+        # Load image
+        image = dataset.load_image(image_id)
+
+        # Run detection
+        t = time.time()
+        r = model.detect([image], clusterCategory=True)[0]
+        t_prediction += (time.time() - t)
+
+        # Convert results to COCO format
+        image_results = build_coco_results(dataset, coco_image_ids[i:i + 1],
+                                           r["rois"], r["class_ids"],
+                                           r["scores"], r["masks"])
+        results.extend(image_results)
+
+    # Load results. This modifies results with additional attributes.
+    coco_results = coco.loadRes(results)
+
+    # Evaluate
+    cocoEval = COCOeval(coco, coco_results, eval_type)
+    cocoEval.params.imgIds = coco_image_ids
+    cocoEval.evaluate()
+    cocoEval.accumulate()
+    cocoEval.summarize()
+
+    print("Prediction time: {}. Average {}/image".format(
+        t_prediction, t_prediction / len(image_ids)))
+    print("Total time: ", time.time() - t_start)
+
+if __name__ == '__main__':
+
+    MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190311T1813/mask_rcnn_seafloor_0010.pth"
+    DATASET_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor"
+    MODEL_DIR = os.path.join(ROOT_DIR, "logs")
+    configDir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/config.json"
+    ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation_zero_shot.pkl"
+    dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
+    coco_ann_dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotations/subset-20_clustering.json"
+
+    class InferenceConfig(seafloor_config):
+        # Set batch size to 1 since we'll be running inference on
+        # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
+        GPU_COUNT = 1
+        IMAGES_PER_GPU = 1
+        DETECTION_MIN_CONFIDENCE = .6
+
+
+    config = InferenceConfig()
+    config.display()
+
+    # Create model object.
+    model = modellib.MaskRCNN(model_dir=MODEL_DIR, config=config)
+    if config.GPU_COUNT:
+        model = model.cuda()
+
+    model.load_weights(MODEL_PATH)
+
+    import matplotlib.pyplot as plt
+    import skimage.io as io
+
+    dataset_val = seafloor_dataset()
+    coco = dataset_val.load_coco(dataset_dir=DATASET_PATH, annotation_dir=coco_ann_dir, subset="subset-20", return_coco=True)
+    dataset_val.prepare()
+
+    imgIds = coco.getImgIds()
+    img = coco.loadImgs(imgIds[np.random.randint(0, len(imgIds))])[0]
+    I = io.imread("/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/subset-20/" + img['file_name'])
+    plt.axis('off')
+    plt.imshow(I)
+    plt.show()
+    plt.imshow(I)
+    plt.axis('off')
+    catIds = coco.getCatIds(catNms=['person','dog','skateboard']);
+    annIds = coco.getAnnIds(imgIds=img['id'], catIds=catIds, iscrowd=None)
+    anns = coco.loadAnns(annIds)
+    coco.showAnns(anns)
+
+    dataset_train_clustering = seafloor_dataset()
+    dataset_train_clustering.load_seafloor(dir, configDir, ann_path)
+    dataset_train_clustering.prepare()
+    model.train_clustering(dataset_train_clustering)
+    print("Running COCO evaluation")
+    evaluate_coco(model, dataset_val, coco, "bbox", limit=100)
+    evaluate_coco(model, dataset_val, coco, "segm", limit=100)
