@@ -1495,6 +1495,32 @@ class MaskRCNN(nn.Module):
         plt.colorbar()
         plt.show()
 
+    def tsne(self, class_names=[]):
+        from sklearn.manifold import TSNE
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        from matplotlib.colors import Normalize
+        from matplotlib import colors
+
+        cmap = colors.ListedColormap(['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'xkcd:coral', 'xkcd:dark violet', 'xkcd:dark cyan'])
+
+        targets = [cmap(i) for i in self.pca_targets]
+        colors = [cmap(i) for i in range(len(class_names))]
+
+        tsne = TSNE(n_components=2, perplexity=20, n_iter=300)
+        projected = tsne.fit_transform(self.pca_vectors)
+        plt.scatter(projected[:, 0], projected[:, 1],
+                    c=targets, edgecolor='none', alpha=0.9)
+        plt.xlabel('component 1')
+        plt.ylabel('component 2')
+
+        import matplotlib.patches as mpatches
+        patches = []
+
+        for i in range(len(colors)):
+            patches.append(mpatches.Patch(color=colors[i], label=class_names[i]))
+        plt.legend(handles=patches)
+        plt.show()
 
 
     def train_clustering(self, train_dataset):
@@ -1504,8 +1530,6 @@ class MaskRCNN(nn.Module):
 
         train_set = Dataset(train_dataset, self.config, augment=True)
         train_generator = torch.utils.data.DataLoader(train_set, batch_size=1, shuffle=True, num_workers=4)
-        ground_truth = []
-        ground_truth_ids = []
         for inputs in train_generator:
 
             images = inputs[0]
@@ -1575,16 +1599,16 @@ class MaskRCNN(nn.Module):
             x2 = x.cpu()
             gt_class_ids2 = gt_class_ids.cpu()
 
+            from seafloor_dataset import get_supercategory
 
-            for feature in x2:
-                ground_truth.append(feature.view(-1).data.numpy())
-                self.pca_vectors.append(feature.view(-1).data.numpy())
-            for id in gt_class_ids2[0]:
-                ground_truth_ids.append(id.data.numpy()[0])
-                self.pca_targets.append(id.data.numpy()[0])
+            for i in range(len(x2)):
+                if gt_class_ids2[0][i].data.numpy()[0] != 7 and gt_class_ids2[0][i].data.numpy()[0] != 8 and gt_class_ids2[0][i].data.numpy()[0] != 9 and gt_class_ids2[0][i].data.numpy()[0] != 10 and gt_class_ids2[0][i].data.numpy()[0] != 11:
+                    self.pca_vectors.append(x2[i].view(-1).data.numpy())
+                    self.pca_targets.append(gt_class_ids2[0][i].data.numpy()[0])
+
 
         torch.cuda.empty_cache()
-        self.nearestNeighbors = KNeighborsClassifier(n_neighbors=1).fit(ground_truth, ground_truth_ids)
+        self.nearestNeighbors = KNeighborsClassifier(n_neighbors=5).fit(self.pca_vectors, self.pca_targets)
 
 
     def initialize_weights(self):
@@ -1742,19 +1766,33 @@ class MaskRCNN(nn.Module):
         detections, mrcnn_mask = None, None
 
         # Run object detection
+        import time
 
+        start = time.time()
         detections, mrcnn_mask = self.predict([molded_images, image_metas], mode=mode)
+        # print(time.time() - start)
 
         # Convert to numpy
         detections = detections.data.cpu().numpy()
         mrcnn_mask = mrcnn_mask.permute(0, 1, 3, 4, 2).data.cpu().numpy()
+
+        #edit
+        # for i in range(len(detections[0])):
+        #     if detections[0, i, 4] != 1:
+        #         temp = np.array(np.array([]))
+        #
+        #         for p in range(len(detections[0])):
+        #             if p != i:
+        #                 np.append(temp[0], detections[0, p])
+        #         detections = temp
+        #         i -= 1
 
         # Process detections
         results = []
         for i, image in enumerate(images):
             final_rois, final_class_ids, final_scores, final_masks =\
                 self.unmold_detections(detections[i], mrcnn_mask[i],
-                                       image.shape, windows[i])
+                                       image.shape, windows[i], mode=mode)
             results.append({
                 "rois": final_rois,
                 "class_ids": final_class_ids,
@@ -1765,6 +1803,8 @@ class MaskRCNN(nn.Module):
 
 
     def predict(self, input, mode):
+
+        from sklearn.metrics import silhouette_samples, silhouette_score
 
         molded_images = input[0]
         image_metas = input[1]
@@ -1842,6 +1882,8 @@ class MaskRCNN(nn.Module):
             return [detections, mrcnn_mask]
         elif mode == 'zeroshot_no_training':
 
+            from seafloor_dataset import get_supercategory
+
             # Network Heads
             # Proposal classifier and BBox regressor heads
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rpn_rois)
@@ -1874,22 +1916,50 @@ class MaskRCNN(nn.Module):
 
             self.ground_truth = self.ground_truth + x
 
+            best_k = 1
+            best_k_score = -2
 
-            for i in x:
-                if self.k_means.n_clusters == 0:
-                    self.k_means = KMeans(n_clusters=1)
-                    self.k_means.fit(self.ground_truth)
-                else:
-                    temp = []
-                    temp.append(i)
-                    distances = self.k_means.transform(temp)
-                    if np.min(distances) > self.min_dist_for_new_cluster:
-                        self.k_means = KMeans(n_clusters=self.k_means.n_clusters + 1)
-                        self.k_means.fit_transform(self.ground_truth)
+            import time
 
+            start = time.time()
+
+            # r = len(self.ground_truth)
+            # l = 2
+            #
+            # while l <= r:
+            #
+            #     mid = l + (r - l) / 2
+            #
+            #     self.k_means = KMeans(n_clusters=mid)
+            #     cluster_labels = self.k_means.fit_predict(self.ground_truth)
+            #     score = silhouette_score(self.ground_truth, cluster_labels)
+            #     # If x is greater, ignore left half
+            #     if score < best_k_score:
+            #         l = mid + 1
+            #
+            #     # If x is smaller, ignore right half
+            #     else:
+            #         r = mid - 1
+
+            for k in range(2, len(self.ground_truth)):
+                self.k_means = KMeans(n_clusters=k)
+                cluster_labels = self.k_means.fit_predict(self.ground_truth)
+                silhouette_avg = silhouette_score(self.ground_truth, cluster_labels)
+                if(silhouette_avg > best_k_score):
+                    best_k_score = silhouette_avg
+                    best_k = k
+
+            print(time.time() - start)
+
+            self.k_means = KMeans(n_clusters=best_k).fit(self.ground_truth)
+
+            detections_cpu = detections.cpu()
             temp = torch.from_numpy(self.k_means.predict(x) + 1)
             for i in range(len(x)):
-                detections[i, 4] = temp[i]
+                if detections_cpu.data.numpy()[i, 4] == 2 or detections_cpu.data.numpy()[i, 4] == 3:
+                    detections[i, 4] = 0
+                else:
+                    detections[i, 4] = temp[i]
 
             # Create masks for detections
             mrcnn_mask = self.mask(mrcnn_feature_maps, detection_boxes)
@@ -1897,6 +1967,8 @@ class MaskRCNN(nn.Module):
             # Add back batch dimension
             detections = detections.unsqueeze(0)
             mrcnn_mask = mrcnn_mask.unsqueeze(0)
+
+            torch.cuda.empty_cache()
 
             return [detections, mrcnn_mask]
 
@@ -2089,12 +2161,12 @@ class MaskRCNN(nn.Module):
             image_metas = image_metas.numpy()
 
             # Wrap in variables
-            images = Variable(images)
-            rpn_match = Variable(rpn_match)
-            rpn_bbox = Variable(rpn_bbox)
-            gt_class_ids = Variable(gt_class_ids)
-            gt_boxes = Variable(gt_boxes)
-            gt_masks = Variable(gt_masks)
+            images = Variable(images, volatile=True)
+            rpn_match = Variable(rpn_match, volatile=True)
+            rpn_bbox = Variable(rpn_bbox, volatile=True)
+            gt_class_ids = Variable(gt_class_ids, volatile=True)
+            gt_boxes = Variable(gt_boxes, volatile=True)
+            gt_masks = Variable(gt_masks, volatile=True)
 
             # To GPU
             if self.config.GPU_COUNT:
@@ -2255,7 +2327,7 @@ class MaskRCNN(nn.Module):
         windows = np.stack(windows)
         return molded_images, image_metas, windows
 
-    def unmold_detections(self, detections, mrcnn_mask, image_shape, window):
+    def unmold_detections(self, detections, mrcnn_mask, image_shape, window, mode="inference"):
         """Reformats the detections of one image from the format of the neural
         network output to a format suitable for use in the rest of the
         application.
@@ -2281,7 +2353,16 @@ class MaskRCNN(nn.Module):
         boxes = detections[:N, :4]
         class_ids = detections[:N, 4].astype(np.int32)
         scores = detections[:N, 5]
-        masks = mrcnn_mask[np.arange(N), :, :, class_ids]
+        #edit for different modes
+        if mode == "zeroshot_no_training":
+            class_ids_copy = np.array([1 if class_ids[i] == 2 or class_ids[i] == 3 else 2 for i in range(len(class_ids))])
+            masks = mrcnn_mask[np.arange(N), :, :, class_ids_copy]
+        elif mode == "zeroshot":
+            from seafloor_dataset import get_supercategory
+            class_ids_copy = np.array([get_supercategory(class_ids[i]) for i in range(len(class_ids))])
+            masks = mrcnn_mask[np.arange(N), :, :, class_ids_copy]
+        else:
+            masks = mrcnn_mask[np.arange(N), :, :, class_ids]
 
         # Compute scale and shift to translate coordinates to image domain.
         h_scale = image_shape[0] / (window[2] - window[0])

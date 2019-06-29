@@ -12,6 +12,7 @@ import utils
 import model as modellib
 import visualize
 from seafloor_dataset import seafloor_config
+import seafloor_dataset
 
 import torch
 
@@ -26,7 +27,7 @@ CLUSTER_TRAIN_DIR = ""
 # Path to trained weights file
 # Download this file and place in the root of your
 # project (See README file for details)
-MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190311T1813/mask_rcnn_seafloor_0010.pth"
+MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190423T2237/mask_rcnn_seafloor_0010.pth"
 
 
 
@@ -35,7 +36,7 @@ class InferenceConfig(seafloor_config):
     # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
     GPU_COUNT = 1
     IMAGES_PER_GPU = 1
-    DETECTION_MIN_CONFIDENCE = .6
+    DETECTION_MIN_CONFIDENCE = .7
 
 config = InferenceConfig()
 config.display()
@@ -48,13 +49,12 @@ if config.GPU_COUNT:
 # Load weights trained on MS-COCO
 model.load_weights(MODEL_PATH)
 
-# COCO Class names
-# Index of the class in the list is its ID. For example, to get ID of
-# the teddy bear class, use: class_names.index('teddy bear')
-class_names = ["BG", "Other", "Big_Lump", "Potato"]
-class_names = [str(i) for i in range(100)]
+class_names = ["BG", "Coral", "Sand", "Rock", "Fish"]
+class_names = ["BG", "Brain Coral", "Fire Coral", "Tube Coral", "Sea Rod", "Yellow Green Big Lump", "Other Coral", "Sand", "Sand2", "Rock", "Algae Rock", "Fish", "Potato Coral"]
 
-dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
+# class_names = [str(i) for i in range(100)]
+
+dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/subset-20"
 configDir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/config.json"
 ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation_zero_shot.pkl"
 IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/demo"
@@ -67,20 +67,30 @@ model.train_clustering(dataset_train)
 
 plt.figure(figsize=(15, 9))
 
-ax = plt.figure(1).subplots(1)
-im = ax.imshow(skimage.io.imread(os.path.join(IMAGE_DIR, os.listdir(IMAGE_DIR)[0])))
+# ax = plt.figure(1).subplots(1)
+# im = ax.imshow(skimage.io.imread(os.path.join(IMAGE_DIR, os.listdir(IMAGE_DIR)[0])))
+
+visualize.initializeColors(len(class_names))
 
 for i, file in enumerate(sorted(os.listdir(IMAGE_DIR))):
     if "mask" not in file:
         image = skimage.io.imread(os.path.join(IMAGE_DIR, file))
-        results = model.detect([image], mode="zeroshot_no_training")
+        results = model.detect([image], mode="zeroshot")
         r = results[0]
-        visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
-                                    class_names, r['scores'], ax=ax, im=im)
+        # visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
+        #                             class_names, r['scores'], axes=[ax], im=im)
+        # plt.pause(2)
 
-model.pca()
+model.tsne(class_names = class_names)
 
-#don't train bounding box on terrain, just coral
-#do this by removing terrain bounding boxes from ground truth
-#but use them for classification when training
+#improve speed of silouette optimization
 
+#maskutils.iou
+
+#display annotated image in clustering_dataset
+
+#training and evaluation of mask r-cnn in seafloor_dataset.py
+
+#demo mask rcnn in demo.py
+
+#demo zero shot and pca in demo_zero_shot.py

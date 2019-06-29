@@ -74,10 +74,38 @@ def apply_mask(image, mask, color, alpha=0.5):
                                   image[:, :, c])
     return image
 
+colors = []
+
+def display_coco(coco, path, image_name, ax):
+    import skimage.io as io
+
+    ax.clear()
+
+    imgs = coco.imgs
+    id = -1
+    for i in range(1, len(imgs)):
+        if imgs[i]["file_name"] == image_name:
+            id = i
+            break
+
+    img = coco.loadImgs(id)[0]
+    I = io.imread(path + "/" + img['file_name'])
+    ax.imshow(I)
+    plt.axis('off')
+    catIds = coco.getCatIds()
+    annIds = coco.getAnnIds(imgIds=img['id'], catIds=catIds, iscrowd=None)
+    anns = coco.loadAnns(annIds)
+    coco.showAnns(anns, colors, ax=ax)
+
+
+
+def initializeColors(n):
+    global colors
+    colors = random_colors(n)
 
 def display_instances(image, boxes, masks, class_ids, class_names,
                       scores=None, title="",
-                      figsize=(16, 16), ax=None, im=None):
+                      figsize=(16, 16), axes=None, im=None):
     """
     boxes: [num_instance, (y1, x1, y2, x2, class_id)] in image coordinates.
     masks: [height, width, num_instances]
@@ -86,6 +114,10 @@ def display_instances(image, boxes, masks, class_ids, class_names,
     scores: (optional) confidence scores for each box
     figsize: (optional) the size of the image.
     """
+
+
+    ax = axes[0]
+
     # Number of instances
     N = boxes.shape[0]
     if not N:
@@ -97,7 +129,7 @@ def display_instances(image, boxes, masks, class_ids, class_names,
         _, ax = plt.subplots(1, figsize=figsize)
 
     # Generate random colors
-    colors = random_colors(N)
+
 
     # Show area outside image boundaries.
     height, width = image.shape[:2]
@@ -107,8 +139,13 @@ def display_instances(image, boxes, masks, class_ids, class_names,
     ax.set_title(title)
 
     masked_image = image.astype(np.uint32).copy()
+
+    [p.remove() for p in reversed(ax.patches)]
+    [p.remove() for p in reversed(ax.texts)]
+
+    global colors
     for i in range(N):
-        color = colors[i]
+        color = colors[class_ids[i]]
 
         # Bounding box
         if not np.any(boxes[i]):
@@ -118,7 +155,7 @@ def display_instances(image, boxes, masks, class_ids, class_names,
         p1 = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=2,
                               alpha=0.7, linestyle="dashed",
                               edgecolor=color, facecolor='none')
-        ax.add_patch(p1)
+        # ax.add_patch(p1)
 
         # Label
         class_id = class_ids[i]
@@ -147,9 +184,7 @@ def display_instances(image, boxes, masks, class_ids, class_names,
             ax.add_patch(p2)
 
     im.set_data(masked_image.astype(np.uint8))
-    plt.pause(1.3)
-    [p.remove() for p in reversed(ax.patches)]
-    [p.remove() for p in reversed(ax.texts)]
+
 
 
     

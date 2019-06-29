@@ -66,20 +66,25 @@ def flood_fill(filled, imageArr, origx, origy):
     return np.array(mask)
 
 def get_supercategory(id):
-    if id == 5:
-        return 2
-    elif id == 12:
-        return 3
-    else:
-        return 1
+    # if id == 5:
+    #     return 2
+    # elif id == 12:
+    #     return 3
+    # else:
+    #     return 1
+    return id
 
 class seafloor_dataset(utils.Dataset):
 
 
     def load_seafloor(self, dir, configDir, ann_path):
-        self.add_class("seafloor", 1, "other")
-        self.add_class("seafloor", 2, "weird_big_lump")
-        self.add_class("seafloor", 3, "potato")
+
+        class_names = ["BG", "Brain Coral", "Fire Coral", "Tube Coral", "Sea Rod", "Yellow Green Big Lump",
+                       "Other Coral", "Sand", "Rock", "Algae Rock", "Fish", "Potato Coral"]
+
+        for i in range(len(class_names)):
+            self.add_class("seafloor", i, class_names[i])
+
         import json
         import pickle
         config = json.load(open(configDir))
@@ -209,7 +214,7 @@ class seafloor_config(Config):
     # GPU_COUNT = 8
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + 3  # COCO has 80 classes
+    NUM_CLASSES = 1 + 4  # COCO has 80 classes
     LEARNING_RATE = 0.001
 
 def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
@@ -264,7 +269,7 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 
         # Run detection
         t = time.time()
-        r = model.detect([image], clusterCategory=True)[0]
+        r = model.detect([image], mode="zeroshot")[0]
         t_prediction += (time.time() - t)
 
         # Convert results to COCO format
@@ -289,13 +294,13 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 
 if __name__ == '__main__':
 
-    MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190311T1813/mask_rcnn_seafloor_0010.pth"
+    MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190423T2237/mask_rcnn_seafloor_0060.pth"
     DATASET_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor"
     MODEL_DIR = os.path.join(ROOT_DIR, "logs")
     configDir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/config.json"
-    ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation_zero_shot.pkl"
-    dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/clustering_images"
-    coco_ann_dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotations/subset-20_clustering.json"
+    ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation.pkl"
+    dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/subset-20"
+    coco_ann_dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotations/test.json"
 
     class InferenceConfig(seafloor_config):
         # Set batch size to 1 since we'll be running inference on
@@ -319,21 +324,22 @@ if __name__ == '__main__':
     import skimage.io as io
 
     dataset_val = seafloor_dataset()
-    coco = dataset_val.load_coco(dataset_dir=DATASET_PATH, annotation_dir=coco_ann_dir, subset="subset-20", return_coco=True)
+    coco = dataset_val.load_coco(dataset_dir=DATASET_PATH, annotation_dir=coco_ann_dir, subset="test", return_coco=True)
     dataset_val.prepare()
 
-    imgIds = coco.getImgIds()
-    img = coco.loadImgs(imgIds[np.random.randint(0, len(imgIds))])[0]
-    I = io.imread("/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/subset-20/" + img['file_name'])
-    plt.axis('off')
-    plt.imshow(I)
-    plt.show()
-    plt.imshow(I)
-    plt.axis('off')
-    catIds = coco.getCatIds(catNms=['person','dog','skateboard']);
-    annIds = coco.getAnnIds(imgIds=img['id'], catIds=catIds, iscrowd=None)
-    anns = coco.loadAnns(annIds)
-    coco.showAnns(anns)
+    #display annotated image
+    # imgIds = coco.getImgIds()
+    # img = coco.loadImgs(imgIds[np.random.randint(0, len(imgIds))])[0]
+    # I = io.imread("/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/subset-20/" + img['file_name'])
+    # plt.axis('off')
+    # plt.imshow(I)
+    # plt.show()
+    # plt.imshow(I)
+    # plt.axis('off')
+    # catIds = coco.getCatIds()
+    # annIds = coco.getAnnIds(imgIds=img['id'], catIds=catIds, iscrowd=None)
+    # anns = coco.loadAnns(annIds)
+    # coco.showAnns(anns)
 
     dataset_train_clustering = seafloor_dataset()
     dataset_train_clustering.load_seafloor(dir, configDir, ann_path)

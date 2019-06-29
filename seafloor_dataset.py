@@ -1,4 +1,3 @@
-
 import os
 import time
 import numpy as np
@@ -72,10 +71,17 @@ def get_supercategory(id):
     #     return numpy.int64(2)
     # elif id == 11:
     #     return numpy.int64(3)
-    if id == 8:
-        return 7
-    if id == 10:
-        return 9
+
+    if id == 1 or id == 2 or id == 3 or id == 4 or id == 5 or id == 6 or id == 12:
+        return 1
+    if id == 8 or id == 7:
+        return 2
+    if id == 10 or id == 9:
+        return 3
+    if id == 11:
+        return 4
+    if id == 0:
+        return 0
     return id
 
 class seafloor_dataset(utils.Dataset):
@@ -128,16 +134,10 @@ class seafloor_dataset(utils.Dataset):
             return coco
 
     def load_seafloor(self, dir, configDir, ann_path):
-        self.add_class("seafloor", 1, "Brain Coral")
-        self.add_class("seafloor", 2, "Fire Coral")
-        self.add_class("seafloor", 3, "Tube Coral")
-        self.add_class("seafloor", 4, "Sea Rod")
-        self.add_class("seafloor", 5, "Yellow Green Big Lump")
-        self.add_class("seafloor", 6, "Other Coral")
+        self.add_class("seafloor", 1, "Coral")
         self.add_class("seafloor", 7, "Sand")
         self.add_class("seafloor", 9, "Rock")
         self.add_class("seafloor", 11, "Fish")
-        self.add_class("seafloor", 12, "Potato Coral")
 
         import json
         import pickle
@@ -220,7 +220,26 @@ class seafloor_config(Config):
     # GPU_COUNT = 8
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + 12  # COCO has 80 classes
+    NUM_CLASSES = 1 + 4  # COCO has 80 classes
+    LEARNING_RATE = 0.0013
+
+class seafloor_config_reduced(Config):
+    """Configuration for training on MS COCO.
+    Derives from the base Config class and overrides values specific
+    to the COCO dataset.
+    """
+    # Give the configuration a recognizable name
+    NAME = "seafloor"
+
+    # We use one GPU with 8GB memory, which can fit one image.
+    # Adjust down if you use a smaller GPU.
+    IMAGES_PER_GPU = 4
+
+    # Uncomment to train on 8 GPUs (default is 1)
+    # GPU_COUNT = 8
+
+    # Number of classes (including background)
+    NUM_CLASSES = 1 + 3  # COCO has 80 classes
     LEARNING_RATE = 0.0013
 
 DEFAULT_LOGS_DIR = os.path.join(ROOT_DIR, "logs")
@@ -260,10 +279,10 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 
         # Run detection
         t = time.time()
-        r = model.detect([image], clusterCategory=False)[0]
+        r = model.detect([image], mode="inference")[0]
         t_prediction += (time.time() - t)
 
-        # Convert results to COCO format
+            # Convert results to COCO format
         image_results = build_coco_results(dataset, coco_image_ids[i:i + 1],
                                            r["rois"], r["class_ids"],
                                            r["scores"], r["masks"])
@@ -362,6 +381,20 @@ def evaluate_seafloor(model, dataset, eval_type="bbox", limit=0, image_ids=None)
         t_prediction, t_prediction / len(image_ids)))
     print("Total time: ", time.time() - t_start)
 
+def move_data(number, oldDir, newDir):
+    if len(os.listdir(newDir)) == 0:
+        i = 0
+        while i < number:
+            files = os.listdir(oldDir)
+            rand = randint(0, len(files) - 1)
+            if "mask" in files[rand] and not "color" in files[rand] and not "watershed" in files[rand]:
+                os.rename(oldDir + "/" + files[rand], newDir + "/" + files[rand])
+                os.rename(oldDir + "/" + files[rand].replace("_mask", ""), newDir + "/" + files[rand].replace("_mask", ""))
+            else:
+                i -= 1
+            i+=1
+
+
 
 if __name__ == '__main__':
     import argparse
@@ -417,10 +450,6 @@ if __name__ == '__main__':
         if args.model.lower() == "coco":
             model_path = COCO_MODEL_PATH
             model.load_weights_pretrained(model_path)
-        elif args.model.lower() == "last":
-            # Find last trained weights
-            model_path = model.find_last()[1]
-            model.load_weights(model_path)
         else:
             model_path = args.model
             model.load_weights(model_path)
@@ -429,14 +458,19 @@ if __name__ == '__main__':
         model.load_weights(model_path)
 
 
-    # model.load_weights("/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190311T1813/mask_rcnn_seafloor_0009.pth")
+
 
     dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/subset-20"
+    test_dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/test"
     configDir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/config.json"
     ann_path = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation.pkl"
+    ann_path_test = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotation_test.pkl"
 
     # Train or evaluate
     if args.command == "train":
+
+        move_data(30, dir, test_dir)
+
         # Training dataset. Use the training set and 35K from the
         # validation set, as as in the Mask RCNN paper.
         dataset_train = seafloor_dataset()
@@ -444,7 +478,9 @@ if __name__ == '__main__':
         dataset_train.prepare()
 
         # Validation dataset
-        dataset_val = dataset_train
+        dataset_val = seafloor_dataset()
+        dataset_val.load_seafloor(test_dir, configDir, ann_path_test)
+        dataset_val.prepare()
 
         # *** This training schedule is an example. Update to your needs ***
 
@@ -472,7 +508,7 @@ if __name__ == '__main__':
                           layers='heads')
 
     elif args.command == "evaluate":
-        MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190311T1813/mask_rcnn_seafloor_0010.pth"
+        MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190423T2237/mask_rcnn_seafloor_0107.pth"
         DATASET_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor"
         MODEL_DIR = os.path.join(ROOT_DIR, "logs")
 
@@ -497,11 +533,10 @@ if __name__ == '__main__':
 
         # Validation dataset
 
-        dataset_val = seafloor_dataset()
-        coco = dataset_val.load_coco(dataset_dir=DATASET_PATH, subset="subset-20", return_coco=True)
-        dataset_val.prepare()
+        dataset_coco = seafloor_dataset()
+        coco = dataset_coco.load_coco(dataset_dir=DATASET_PATH, subset="test", return_coco=True)
+        dataset_coco.prepare()
+
         print("Running COCO evaluation")
-        evaluate_coco(model, dataset_val, coco, "bbox", limit=100)
-        evaluate_coco(model, dataset_val, coco, "segm", limit=100)
-
-
+        evaluate_coco(model, dataset_coco, coco, "bbox", limit=100)
+        evaluate_coco(model, dataset_coco, coco, "segm", limit=100)

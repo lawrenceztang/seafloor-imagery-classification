@@ -12,6 +12,7 @@ import utils
 import model as modellib
 import visualize
 from seafloor_dataset import seafloor_config
+from seafloor_dataset import seafloor_dataset
 
 import torch
 
@@ -23,12 +24,10 @@ ROOT_DIR = os.getcwd()
 MODEL_DIR = os.path.join(ROOT_DIR, "logs")
 
 # Path to trained weights file
-MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190312T2318/mask_rcnn_seafloor_0060.pth"
-MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190421T1508/mask_rcnn_seafloor_0150.pth"
+MODEL_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/logs/seafloor20190423T2237/mask_rcnn_seafloor_0060.pth"
 
 # Directory of images to run detection on
-IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/Examples"
-IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/demo"
+IMAGE_DIR = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/test"
 
 
 class InferenceConfig(seafloor_config):
@@ -52,20 +51,29 @@ model.load_weights(MODEL_PATH)
 # COCO Class names
 # Index of the class in the list is its ID. For example, to get ID of
 # the teddy bear class, use: class_names.index('teddy bear')
-class_names = ["BG", "Coral", "Terrain", "Fish"]
 class_names = ["BG", "Brain Coral", "Fire Coral", "Tube Coral", "Sea Rod", "Yellow Green Big Lump", "Other Coral", "Sand", "Rock", "Algae Rock", "Fish", "Potato Coral"]
+class_names = ["BG", "Coral", "Sand", "Rock", "Fish"]
+
+coco_ann_dir = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor/annotations/test.json"
+DATASET_PATH = "/home/lawrence/PycharmProjects/pytorch-mask-rcnn/seafloor"
+dataset_val = seafloor_dataset()
+coco = dataset_val.load_coco(dataset_dir=DATASET_PATH, subset="test", return_coco=True)
+
+visualize.initializeColors(len(class_names))
 
 plt.figure(figsize=(15, 9))
 plt.ion()
 
-ax = plt.figure(1).subplots(1)
-im = ax.imshow(skimage.io.imread(os.path.join(IMAGE_DIR, os.listdir(IMAGE_DIR)[0])))
+ax = plt.figure(1).subplots(ncols=2)
+im = ax[0].imshow(skimage.io.imread(os.path.join(IMAGE_DIR, os.listdir(IMAGE_DIR)[0])))
 
 for i, file in enumerate(sorted(os.listdir(IMAGE_DIR))):
     if "mask" not in file:
         image = skimage.io.imread(os.path.join(IMAGE_DIR, file))
-        results = model.detect([image])
+        results = model.detect([image], mode="inference")
         r = results[0]
         visualize.display_instances(image, r['rois'], r['masks'], r['class_ids'],
-                                    class_names, r['scores'], ax=ax, im=im)
+                                    class_names, r['scores'], axes=ax, im=im)
+        visualize.display_coco(coco, DATASET_PATH + "/test",  file, ax[1])
+        plt.pause(2)
 
